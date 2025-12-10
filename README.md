@@ -1,6 +1,6 @@
 # Underleaf GitHub Actions
 
-A collection of GitHub Actions for integrating [Underleaf](https://underleaf.dev) server management into your CI/CD pipelines.
+A collection of GitHub Actions for integrating [Underleaf](https://underleafapp.com) server management into your CI/CD pipelines.
 
 ## Available Actions
 
