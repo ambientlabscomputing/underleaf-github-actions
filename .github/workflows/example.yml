@@ -1,0 +1,100 @@
+name: Example Workflow
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Example 1: Deploy to production
+  deploy-production:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Deploy application
+        id: deploy
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          command: './scripts/deploy.sh'
+          work-dir: '/opt/myapp'
+          timeout: 600
+          tags: '{"environment":"production","app":"web"}'
+          env-vars: '{"VERSION":"${{ github.sha }}","BRANCH":"${{ github.ref_name }}"}'
+      
+      - name: Print deployment info
+        run: |
+          echo "Deployment initiated"
+          echo "Job ID: ${{ steps.deploy.outputs.job-id }}"
+          echo "Timestamp: ${{ steps.deploy.outputs.timestamp }}"
+
+  # Example 2: Run tests on staging
+  test-staging:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Run integration tests
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          command: 'npm run test:integration'
+          work-dir: '/var/www/staging'
+          tags: '{"environment":"staging","app":"api"}'
+
+  # Example 3: Database migration
+  migrate-database:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Run database migrations
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          command: 'npm run migrate'
+          server-ids: 'db-primary-abc123'
+          timeout: 900
+
+  # Example 4: Clear cache across all servers
+  clear-cache:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Clear application cache
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          command: 'systemctl restart myapp-cache'
+          all-servers: 'true'
+
+  # Example 5: Multi-region deployment
+  deploy-multi-region:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        region: [us-east-1, us-west-2, eu-west-1]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Deploy to ${{ matrix.region }}
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          command: './deploy-region.sh'
+          tags: '{"region":"${{ matrix.region }}","environment":"production"}'
+          env-vars: '{"REGION":"${{ matrix.region }}"}'
