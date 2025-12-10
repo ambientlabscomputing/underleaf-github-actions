@@ -118,6 +118,7 @@ runs:
           "work_dir": "$WORK_DIR",
           "timeout": $TIMEOUT,
           "all_servers": $ALL_SERVERS
+        }
         EOF
         )
         
