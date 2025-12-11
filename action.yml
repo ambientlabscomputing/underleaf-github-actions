@@ -81,12 +81,6 @@ runs:
           echo "::error::Must specify one of: all-servers=true, server-ids, or tags"
           exit 1
         fi
-        
-        # Validate API token format
-        if [[ ! "${{ inputs.api-token }}" =~ ^uf_[a-zA-Z0-9]+_.+ ]]; then
-          echo "::error::Invalid API token format. Expected: uf_xxxxx_..."
-          exit 1
-        fi
     
     - name: Run command
       id: run-command
