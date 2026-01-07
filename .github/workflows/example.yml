@@ -1,4 +1,4 @@
-name: Example Workflow
+name: Example Workflows
 
 on:
   push:
@@ -7,6 +7,10 @@ on:
     branches: [main]
 
 jobs:
+  # ============================================
+  # RUN COMMAND EXAMPLES
+  # ============================================
+  
   # Example 1: Deploy to production
   deploy-production:
     runs-on: ubuntu-latest
@@ -17,7 +21,7 @@ jobs:
       
       - name: Deploy application
         id: deploy
-        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
         with:
           api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
           organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
@@ -41,7 +45,7 @@ jobs:
         uses: actions/checkout@v3
       
       - name: Run integration tests
-        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
         with:
           api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
           organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
@@ -58,7 +62,7 @@ jobs:
         uses: actions/checkout@v3
       
       - name: Run database migrations
-        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
         with:
           api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
           organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
@@ -72,7 +76,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Clear application cache
-        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
         with:
           api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
           organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
@@ -91,10 +95,86 @@ jobs:
         uses: actions/checkout@v3
       
       - name: Deploy to ${{ matrix.region }}
-        uses: ambientlabscomputing/underleaf-github-actions/run-command@v1
+        uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
         with:
           api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
           organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
           command: './deploy-region.sh'
           tags: '{"region":"${{ matrix.region }}","environment":"production"}'
           env-vars: '{"REGION":"${{ matrix.region }}"}'
+
+  # ============================================
+  # RUN TEMPLATE EXAMPLES
+  # ============================================
+
+  # Example 6: Deploy using template
+  deploy-template:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Deploy with version template
+        id: template-deploy
+        uses: ambientlabscomputing/underleaf-github-actions/run-template@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          template-id: 'tpl_deploy_app'
+          inputs: '{"version":"${{ github.ref_name }}","environment":"production","rollback":"false"}'
+          tags: '{"app":"web","environment":"production"}'
+      
+      - name: Print template execution info
+        run: |
+          echo "Template deployment initiated"
+          echo "Job ID: ${{ steps.template-deploy.outputs.job-id }}"
+          echo "Template ID: ${{ steps.template-deploy.outputs.template-id }}"
+          echo "Trigger Source: ${{ steps.template-deploy.outputs.trigger-source }}"
+
+  # Example 7: Database backup template
+  backup-database:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Backup production database
+        uses: ambientlabscomputing/underleaf-github-actions/run-template@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          template-id: 'tpl_db_backup'
+          inputs: |
+            {
+              "database": "production_db",
+              "backup_path": "/backups/${{ github.run_id }}",
+              "compress": "true",
+              "retention_days": "30"
+            }
+          server-ids: 'db-primary-001'
+
+  # Example 8: Maintenance template across all servers
+  maintenance-template:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run maintenance tasks
+        uses: ambientlabscomputing/underleaf-github-actions/run-template@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          template-id: 'tpl_maintenance'
+          inputs: '{"task":"cleanup","dry_run":"false"}'
+          all-servers: 'true'
+
+  # Example 9: Rollback template
+  rollback-deployment:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Rollback to previous version
+        uses: ambientlabscomputing/underleaf-github-actions/run-template@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          template-id: 'tpl_rollback'
+          inputs: '{"target_version":"previous","environment":"production"}'
+          tags: '{"app":"web","environment":"production"}'

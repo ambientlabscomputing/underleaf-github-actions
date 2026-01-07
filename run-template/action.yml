@@ -1,0 +1,121 @@
+name: 'Underleaf Run Template'
+description: 'Execute command templates on Underleaf servers via API'
+author: 'Ambient Labs'
+
+branding:
+  icon: 'file-text'
+  color: 'blue'
+
+inputs:
+  api-url:
+    description: 'Underleaf API URL'
+    required: false
+    default: 'https://api.underleafdev.com'
+  
+  api-token:
+    description: 'Underleaf API token (uf_xxxxx_...)'
+    required: true
+  
+  organization-id:
+    description: 'Organization ID'
+    required: true
+  
+  template-id:
+    description: 'Template ID to execute'
+    required: true
+  
+  inputs:
+    description: 'JSON object of input values for template variables (e.g., {"version":"1.2.3","env":"prod"})'
+    required: false
+    default: '{}'
+  
+  all-servers:
+    description: 'Run on all servers in the organization'
+    required: false
+    default: 'false'
+  
+  server-ids:
+    description: 'Comma-separated list of server IDs to target'
+    required: false
+    default: ''
+  
+  tags:
+    description: 'JSON object of tags to filter servers (e.g., {"environment":"production"})'
+    required: false
+    default: ''
+
+outputs:
+  job-id:
+    description: 'Job ID for tracking template execution'
+    value: ${{ steps.run-template.outputs.job-id }}
+  
+  template-id:
+    description: 'Template ID that was executed'
+    value: ${{ steps.run-template.outputs.template-id }}
+  
+  timestamp:
+    description: 'Timestamp of template execution'
+    value: ${{ steps.run-template.outputs.timestamp }}
+  
+  trigger-source:
+    description: 'Source of the trigger (manual, cron)'
+    value: ${{ steps.run-template.outputs.trigger-source }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        source "${{ github.action_path }}/../scripts/common.sh"
+        validate_targeting "${{ inputs.all-servers }}" "${{ inputs.server-ids }}" "${{ inputs.tags }}"
+    
+    - name: Run template
+      id: run-template
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        TEMPLATE_ID: ${{ inputs.template-id }}
+        INPUTS: ${{ inputs.inputs }}
+        ALL_SERVERS: ${{ inputs.all-servers }}
+        SERVER_IDS: ${{ inputs.server-ids }}
+        TAGS: ${{ inputs.tags }}
+      run: |
+        source "${{ github.action_path }}/../scripts/common.sh"
+        source "${{ github.action_path }}/../scripts/api.sh"
+        
+        # Build base payload with inputs
+        payload=$(jq -n --argjson inp "$INPUTS" '{inputs: $inp}')
+        
+        # Add targeting
+        targeting=$(build_targeting_json "$ALL_SERVERS" "$SERVER_IDS" "$TAGS")
+        payload=$(echo "$payload" | jq ". + $targeting")
+        
+        payload=$(echo "$payload" | jq -c .)
+        echo "::debug::Payload: $payload"
+        
+        # Make API request to template trigger endpoint
+        response=$(make_api_request "$API_URL" "$API_TOKEN" "$ORG_ID" "POST" "/api/v1/templates/${TEMPLATE_ID}/trigger" "$payload")
+        
+        # Extract outputs
+        job_id=$(echo "$response" | jq -r '.job_id')
+        template_id=$(echo "$response" | jq -r '.template_id')
+        timestamp=$(echo "$response" | jq -r '.timestamp')
+        trigger_source=$(echo "$response" | jq -r '.trigger_source // "manual"')
+        
+        if [[ -z "$job_id" || "$job_id" == "null" ]]; then
+          echo "::error::Failed to extract job_id from response"
+          exit 1
+        fi
+        
+        # Set outputs
+        echo "job-id=$job_id" >> $GITHUB_OUTPUT
+        echo "template-id=$template_id" >> $GITHUB_OUTPUT
+        echo "timestamp=$timestamp" >> $GITHUB_OUTPUT
+        echo "trigger-source=$trigger_source" >> $GITHUB_OUTPUT
+        
+        echo "::notice::Template executed successfully"
+        echo "::notice::Job ID: $job_id"
+        echo "::notice::Template ID: $template_id"

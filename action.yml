@@ -1,5 +1,5 @@
-name: 'Underleaf Command'
-description: 'Execute commands on Underleaf servers via API'
+name: 'Underleaf Run Command (Deprecated)'
+description: 'Execute commands on Underleaf servers via API. For new workflows, use ambient-labs/underleaf-github-actions/run-command@v2'
 author: 'Ambient Labs'
 
 branding:
@@ -19,11 +19,6 @@ inputs:
   organization-id:
     description: 'Organization ID'
     required: true
-  
-  request-type:
-    description: 'Type of request (run_command, run_template)'
-    required: false
-    default: 'run_command'
   
   command:
     description: 'Command to execute'
@@ -62,119 +57,26 @@ inputs:
 outputs:
   job-id:
     description: 'Job ID for tracking command execution'
-    value: ${{ steps.run-command.outputs.job-id }}
+    value: ${{ steps.delegate.outputs.job-id }}
   
   timestamp:
     description: 'Timestamp of command execution'
-    value: ${{ steps.run-command.outputs.timestamp }}
+    value: ${{ steps.delegate.outputs.timestamp }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Validate inputs
-      shell: bash
-      run: |
-        # Validate that at least one targeting method is provided
-        if [[ "${{ inputs.all-servers }}" != "true" ]] && \
-           [[ -z "${{ inputs.server-ids }}" ]] && \
-           [[ -z "${{ inputs.tags }}" ]]; then
-          echo "::error::Must specify one of: all-servers=true, server-ids, or tags"
-          exit 1
-        fi
-    
-    - name: Run command
-      id: run-command
-      shell: bash
-      env:
-        API_URL: ${{ inputs.api-url }}
-        API_TOKEN: ${{ inputs.api-token }}
-        ORG_ID: ${{ inputs.organization-id }}
-        REQUEST_TYPE: ${{ inputs.request-type }}
-        COMMAND: ${{ inputs.command }}
-        WORK_DIR: ${{ inputs.work-dir }}
-        TIMEOUT: ${{ inputs.timeout }}
-        ALL_SERVERS: ${{ inputs.all-servers }}
-        SERVER_IDS: ${{ inputs.server-ids }}
-        TAGS: ${{ inputs.tags }}
-        ENV_VARS: ${{ inputs.env-vars }}
-      run: |
-        # Validate request type
-        if [[ "$REQUEST_TYPE" != "run_command" ]]; then
-          echo "::error::Unsupported request type: $REQUEST_TYPE. Only 'run_command' is currently supported."
-          exit 1
-        fi
-        
-        # Build JSON payload
-        payload=$(cat <<EOF
-        {
-          "request_type": "$REQUEST_TYPE",
-          "command": "$COMMAND",
-          "work_dir": "$WORK_DIR",
-          "timeout": $TIMEOUT,
-          "all_servers": $ALL_SERVERS
-        }
-        EOF
-        )
-        
-        # Add server_ids if provided
-        if [[ -n "$SERVER_IDS" ]]; then
-          IFS=',' read -ra SERVER_ARRAY <<< "$SERVER_IDS"
-          server_ids_json=$(printf '%s\n' "${SERVER_ARRAY[@]}" | jq -R . | jq -s .)
-          payload=$(echo "$payload" | jq ". + {\"server_ids\": $server_ids_json}")
-        fi
-        
-        # Add tags if provided
-        if [[ -n "$TAGS" ]]; then
-          payload=$(echo "$payload" | jq ". + {\"tags\": $TAGS}")
-        fi
-        
-        # Add env_vars if provided
-        if [[ -n "$ENV_VARS" ]]; then
-          payload=$(echo "$payload" | jq ". + {\"env_vars\": $ENV_VARS}")
-        fi
-        
-        # Close JSON
-        payload=$(echo "$payload" | jq -c .)
-        
-        echo "::debug::Payload: $payload"
-        
-        # Make API request
-        response=$(curl -s -w "\n%{http_code}" \
-          -X POST \
-          -H "Authorization: Bearer $API_TOKEN" \
-          -H "X-Organization-ID: $ORG_ID" \
-          -H "Content-Type: application/json" \
-          -d "$payload" \
-          "${API_URL}/api/v1/servers/commands/run")
-        
-        # Extract status code and body
-        http_code=$(echo "$response" | tail -n1)
-        body=$(echo "$response" | head -n-1)
-        
-        echo "::debug::HTTP Status: $http_code"
-        echo "::debug::Response: $body"
-        
-        # Check for errors
-        if [[ "$http_code" -ge 400 ]]; then
-          error_msg=$(echo "$body" | jq -r '.error // "Unknown error"')
-          echo "::error::API request failed (HTTP $http_code): $error_msg"
-          exit 1
-        fi
-        
-        # Extract job_id and timestamp
-        job_id=$(echo "$body" | jq -r '.job_id')
-        timestamp=$(echo "$body" | jq -r '.timestamp')
-        
-        if [[ -z "$job_id" || "$job_id" == "null" ]]; then
-          echo "::error::Failed to extract job_id from response"
-          exit 1
-        fi
-        
-        # Set outputs
-        echo "job-id=$job_id" >> $GITHUB_OUTPUT
-        echo "timestamp=$timestamp" >> $GITHUB_OUTPUT
-        
-        # Print summary
-        echo "::notice::Command executed successfully"
-        echo "::notice::Job ID: $job_id"
-        echo "::notice::Timestamp: $timestamp"
+    - name: Delegate to run-command
+      id: delegate
+      uses: ./run-command
+      with:
+        api-url: ${{ inputs.api-url }}
+        api-token: ${{ inputs.api-token }}
+        organization-id: ${{ inputs.organization-id }}
+        command: ${{ inputs.command }}
+        work-dir: ${{ inputs.work-dir }}
+        timeout: ${{ inputs.timeout }}
+        all-servers: ${{ inputs.all-servers }}
+        server-ids: ${{ inputs.server-ids }}
+        tags: ${{ inputs.tags }}
+        env-vars: ${{ inputs.env-vars }}

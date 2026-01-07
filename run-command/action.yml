@@ -1,0 +1,133 @@
+name: 'Underleaf Run Command'
+description: 'Execute commands on Underleaf servers via API'
+author: 'Ambient Labs'
+
+branding:
+  icon: 'terminal'
+  color: 'green'
+
+inputs:
+  api-url:
+    description: 'Underleaf API URL'
+    required: false
+    default: 'https://api.underleafdev.com'
+  
+  api-token:
+    description: 'Underleaf API token (uf_xxxxx_...)'
+    required: true
+  
+  organization-id:
+    description: 'Organization ID'
+    required: true
+  
+  command:
+    description: 'Command to execute'
+    required: true
+  
+  work-dir:
+    description: 'Working directory for command execution'
+    required: false
+    default: ''
+  
+  timeout:
+    description: 'Command timeout in seconds'
+    required: false
+    default: '300'
+  
+  all-servers:
+    description: 'Run on all servers in the organization'
+    required: false
+    default: 'false'
+  
+  server-ids:
+    description: 'Comma-separated list of server IDs to target'
+    required: false
+    default: ''
+  
+  tags:
+    description: 'JSON object of tags to filter servers (e.g., {"environment":"production"})'
+    required: false
+    default: ''
+  
+  env-vars:
+    description: 'JSON object of environment variables to set (e.g., {"KEY":"value"})'
+    required: false
+    default: ''
+
+outputs:
+  job-id:
+    description: 'Job ID for tracking command execution'
+    value: ${{ steps.run-command.outputs.job-id }}
+  
+  timestamp:
+    description: 'Timestamp of command execution'
+    value: ${{ steps.run-command.outputs.timestamp }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        source "${{ github.action_path }}/../scripts/common.sh"
+        validate_targeting "${{ inputs.all-servers }}" "${{ inputs.server-ids }}" "${{ inputs.tags }}"
+    
+    - name: Run command
+      id: run-command
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        COMMAND: ${{ inputs.command }}
+        WORK_DIR: ${{ inputs.work-dir }}
+        TIMEOUT: ${{ inputs.timeout }}
+        ALL_SERVERS: ${{ inputs.all-servers }}
+        SERVER_IDS: ${{ inputs.server-ids }}
+        TAGS: ${{ inputs.tags }}
+        ENV_VARS: ${{ inputs.env-vars }}
+      run: |
+        source "${{ github.action_path }}/../scripts/common.sh"
+        source "${{ github.action_path }}/../scripts/api.sh"
+        
+        # Build base payload with command-specific fields
+        payload=$(jq -n \
+          --arg cmd "$COMMAND" \
+          --arg wd "$WORK_DIR" \
+          --argjson to "$TIMEOUT" \
+          '{
+            command: $cmd,
+            work_dir: $wd,
+            timeout: $to
+          }')
+        
+        # Add targeting
+        targeting=$(build_targeting_json "$ALL_SERVERS" "$SERVER_IDS" "$TAGS")
+        payload=$(echo "$payload" | jq ". + $targeting")
+        
+        # Add env_vars if provided
+        if [[ -n "$ENV_VARS" ]]; then
+          payload=$(echo "$payload" | jq --argjson ev "$ENV_VARS" '. + {env_vars: $ev}')
+        fi
+        
+        payload=$(echo "$payload" | jq -c .)
+        echo "::debug::Payload: $payload"
+        
+        # Make API request
+        response=$(make_api_request "$API_URL" "$API_TOKEN" "$ORG_ID" "POST" "/api/v1/servers/commands/run" "$payload")
+        
+        # Extract outputs
+        job_id=$(echo "$response" | jq -r '.job_id')
+        timestamp=$(echo "$response" | jq -r '.timestamp')
+        
+        if [[ -z "$job_id" || "$job_id" == "null" ]]; then
+          echo "::error::Failed to extract job_id from response"
+          exit 1
+        fi
+        
+        # Set outputs
+        echo "job-id=$job_id" >> $GITHUB_OUTPUT
+        echo "timestamp=$timestamp" >> $GITHUB_OUTPUT
+        
+        echo "::notice::Command executed successfully"
+        echo "::notice::Job ID: $job_id"
