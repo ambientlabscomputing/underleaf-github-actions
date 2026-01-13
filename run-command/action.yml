@@ -87,8 +87,24 @@ runs:
         TAGS: ${{ inputs.tags }}
         ENV_VARS: ${{ inputs.env-vars }}
       run: |
-        source "${{ github.action_path }}/../scripts/common.sh"
-        source "${{ github.action_path }}/../scripts/api.sh"
+        set -euo pipefail
+        
+        echo "::group::Loading helper scripts"
+        source "${{ github.action_path }}/../scripts/common.sh" || {
+          echo "::error::Failed to load common.sh"
+          exit 1
+        }
+        source "${{ github.action_path }}/../scripts/api.sh" || {
+          echo "::error::Failed to load api.sh"
+          exit 1
+        }
+        echo "::endgroup::"
+        
+        echo "::group::Building request payload"
+        echo "::debug::Command: $COMMAND"
+        echo "::debug::Working Directory: $WORK_DIR"
+        echo "::debug::Timeout: $TIMEOUT"
+        echo "::debug::Organization ID: $ORG_ID"
         
         # Build base payload with command-specific fields
         payload=$(jq -n \
@@ -99,35 +115,84 @@ runs:
             command: $cmd,
             work_dir: $wd,
             timeout: $to
-          }')
+          }') || {
+          echo "::error::Failed to build base command payload"
+          echo "::error::Command: $COMMAND"
+          echo "::error::Work Dir: $WORK_DIR"
+          echo "::error::Timeout: $TIMEOUT"
+          exit 1
+        }
+        echo "::debug::Base payload created: $payload"
         
         # Add targeting
-        targeting=$(build_targeting_json "$ALL_SERVERS" "$SERVER_IDS" "$TAGS")
-        payload=$(echo "$payload" | jq ". + $targeting")
+        echo "::debug::Building targeting JSON..."
+        targeting=$(build_targeting_json "$ALL_SERVERS" "$SERVER_IDS" "$TAGS") || {
+          echo "::error::Failed to build targeting JSON"
+          exit 1
+        }
+        
+        payload=$(echo "$payload" | jq ". + $targeting") || {
+          echo "::error::Failed to merge targeting into payload"
+          echo "::error::Payload: $payload"
+          echo "::error::Targeting: $targeting"
+          exit 1
+        }
         
         # Add env_vars if provided
         if [[ -n "$ENV_VARS" ]]; then
-          payload=$(echo "$payload" | jq --argjson ev "$ENV_VARS" '. + {env_vars: $ev}')
+          echo "::debug::Adding environment variables: $ENV_VARS"
+          payload=$(echo "$payload" | jq --argjson ev "$ENV_VARS" '. + {env_vars: $ev}') || {
+            echo "::error::Failed to parse env_vars JSON"
+            echo "::error::Env vars value: $ENV_VARS"
+            echo "::error::Ensure env-vars is valid JSON (e.g., {} or {\"KEY\":\"value\"})"
+            exit 1
+          }
         fi
         
-        payload=$(echo "$payload" | jq -c .)
-        echo "::debug::Payload: $payload"
+        payload=$(echo "$payload" | jq -c .) || {
+          echo "::error::Failed to compact JSON payload"
+          exit 1
+        }
+        echo "::notice::Final payload: $payload"
+        echo "::endgroup::"
         
+        echo "::group::Executing command on servers"
         # Make API request
-        response=$(make_api_request "$API_URL" "$API_TOKEN" "$ORG_ID" "POST" "/api/v1/servers/commands/run" "$payload")
+        response=$(make_api_request "$API_URL" "$API_TOKEN" "$ORG_ID" "POST" "/api/v1/servers/commands/run" "$payload") || {
+          echo "::error::Command execution API request failed"
+          exit 1
+        }
+        echo "::debug::API Response: $response"
+        echo "::endgroup::"
         
+        echo "::group::Extracting response data"
         # Extract outputs
-        job_id=$(echo "$response" | jq -r '.job_id')
-        timestamp=$(echo "$response" | jq -r '.timestamp')
+        job_id=$(echo "$response" | jq -r '.job_id' 2>/dev/null) || {
+          echo "::error::Failed to parse job_id from response"
+          echo "::error::Response: $response"
+          exit 1
+        }
+        timestamp=$(echo "$response" | jq -r '.timestamp' 2>/dev/null) || true
         
         if [[ -z "$job_id" || "$job_id" == "null" ]]; then
-          echo "::error::Failed to extract job_id from response"
+          echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "::error::Failed to extract job_id from API response"
+          echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "::error::This usually means:"
+          echo "::error::  1. The API returned an unexpected response format"
+          echo "::error::  2. The command execution failed on the server"
+          echo "::error::  3. The server IDs are invalid"
+          echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "::error::Full Response: $response"
+          echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           exit 1
         fi
+        echo "::endgroup::"
         
         # Set outputs
         echo "job-id=$job_id" >> $GITHUB_OUTPUT
         echo "timestamp=$timestamp" >> $GITHUB_OUTPUT
         
-        echo "::notice::Command executed successfully"
-        echo "::notice::Job ID: $job_id"
+        echo "::notice::✅ Command executed successfully"
+        echo "::notice::📋 Job ID: $job_id"
+        echo "::notice::⏰ Timestamp: $timestamp"
