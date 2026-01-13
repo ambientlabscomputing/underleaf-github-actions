@@ -133,7 +133,7 @@ runs:
         
         echo "::group::Triggering template execution"
         # Make API request to template trigger endpoint
-        response=$(make_api_request "$API_URL" "$API_TOKEN" "$ORG_ID" "POST" "/api/v1/templates/${TEMPLATE_ID}/trigger" "$payload") || {
+        response=$(make_api_request "$API_URL" "$API_TOKEN" "$ORG_ID" "POST" "/api/v1/servers/templates/${TEMPLATE_ID}/trigger" "$payload") || {
           echo "::error::Template trigger API request failed"
           exit 1
         }
