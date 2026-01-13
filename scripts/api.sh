@@ -13,10 +13,10 @@ make_api_request() {
 
   local full_url="${api_url}${endpoint}"
   
-  echo "::notice::Sending ${http_method} request to ${endpoint}"
-  echo "::debug::Full URL: ${full_url}"
-  echo "::debug::Organization ID: ${org_id}"
-  echo "::debug::Payload: ${payload}"
+  echo "::notice::Sending ${http_method} request to ${endpoint}" >&2
+  echo "::debug::Full URL: ${full_url}" >&2
+  echo "::debug::Organization ID: ${org_id}" >&2
+  echo "::debug::Payload: ${payload}" >&2
 
   # Make the API request
   local response
@@ -34,9 +34,9 @@ make_api_request() {
 
   # Check if curl command itself failed
   if [[ $curl_exit_code -ne 0 ]]; then
-    echo "::error::curl command failed with exit code: ${curl_exit_code}"
-    echo "::error::This usually indicates a network error or invalid URL"
-    echo "::error::Response/Error: ${response}"
+    echo "::error::curl command failed with exit code: ${curl_exit_code}" >&2
+    echo "::error::This usually indicates a network error or invalid URL" >&2
+    echo "::error::Response/Error: ${response}" >&2
     exit 1
   fi
 
@@ -45,32 +45,32 @@ make_api_request() {
   # Extract body (everything except last line)
   local body=$(echo "$response" | sed '$d')
 
-  echo "::debug::HTTP Status Code: ${http_code}"
+  echo "::debug::HTTP Status Code: ${http_code}" >&2
 
   # Check if request was successful
   if [[ "$http_code" != "200" && "$http_code" != "201" ]]; then
-    echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "::error::API Request Failed"
-    echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "::error::HTTP Status Code: ${http_code}"
-    echo "::error::Endpoint: ${http_method} ${endpoint}"
-    echo "::error::URL: ${full_url}"
-    echo "::error::Organization ID: ${org_id}"
-    echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "::error::Response Body:"
-    echo "::error::${body}"
-    echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "::error::API Request Failed" >&2
+    echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "::error::HTTP Status Code: ${http_code}" >&2
+    echo "::error::Endpoint: ${http_method} ${endpoint}" >&2
+    echo "::error::URL: ${full_url}" >&2
+    echo "::error::Organization ID: ${org_id}" >&2
+    echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "::error::Response Body:" >&2
+    echo "::error::${body}" >&2
+    echo "::error::━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
     
     # Try to parse error message from JSON response
     local error_msg=$(echo "$body" | jq -r '.error // .message // "No error message provided"' 2>/dev/null)
     if [[ -n "$error_msg" && "$error_msg" != "null" ]]; then
-      echo "::error::Error Message: ${error_msg}"
+      echo "::error::Error Message: ${error_msg}" >&2
     fi
     
     exit 1
   fi
 
-  echo "::debug::API request successful"
+  echo "::debug::API request successful" >&2
   # Return the response body
   echo "$body"
 }
