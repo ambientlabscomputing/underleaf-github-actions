@@ -1,0 +1,173 @@
+name: 'Underleaf Infrastructure Apply'
+description: 'Apply declarative infrastructure manifests to Underleaf'
+author: 'Ambient Labs'
+
+branding:
+  icon: 'box'
+  color: 'green'
+
+inputs:
+  api-url:
+    description: 'Underleaf API URL'
+    required: false
+    default: 'https://api.underleafdev.com'
+  
+  api-token:
+    description: 'Underleaf API token (uf_xxxxx_...)'
+    required: true
+  
+  organization-id:
+    description: 'Organization ID'
+    required: true
+  
+  manifest-path:
+    description: 'Path to infrastructure manifest file'
+    required: false
+    default: './infra.yaml'
+  
+  auto-approve:
+    description: 'Skip confirmation (always true in CI)'
+    required: false
+    default: 'true'
+
+outputs:
+  manifest-name:
+    description: 'Name of the manifest that was applied'
+    value: ${{ steps.apply.outputs.manifest-name }}
+  
+  success:
+    description: 'Whether the apply succeeded'
+    value: ${{ steps.apply.outputs.success }}
+  
+  operations-count:
+    description: 'Number of operations executed'
+    value: ${{ steps.apply.outputs.operations-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        if [[ ! -f "${{ inputs.manifest-path }}" ]]; then
+          echo "::error::Manifest file not found: ${{ inputs.manifest-path }}"
+          exit 1
+        fi
+        
+        if [[ -z "${{ inputs.api-token }}" ]]; then
+          echo "::error::API token is required"
+          exit 1
+        fi
+        
+        if [[ -z "${{ inputs.organization-id }}" ]]; then
+          echo "::error::Organization ID is required"
+          exit 1
+        fi
+    
+    - name: Get plan
+      id: plan
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+      run: |
+        echo "::notice::Computing infrastructure plan..."
+        
+        PLAN_RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -X POST \
+          -H "Authorization: Bearer ${API_TOKEN}" \
+          -H "X-Organization-ID: ${ORG_ID}" \
+          -H "Content-Type: application/x-yaml" \
+          --data-binary "@${MANIFEST_PATH}" \
+          "${API_URL}/api/v1/servers/infra/plan")
+        
+        HTTP_CODE=$(echo "$PLAN_RESPONSE" | tail -n1)
+        PLAN_BODY=$(echo "$PLAN_RESPONSE" | sed '$d')
+        
+        if [[ "$HTTP_CODE" != "200" ]]; then
+          echo "::error::Failed to get plan (HTTP $HTTP_CODE)"
+          echo "::error::Response: $PLAN_BODY"
+          exit 1
+        fi
+        
+        # Extract summary from plan
+        MANIFEST_NAME=$(echo "$PLAN_BODY" | jq -r '.manifest_name')
+        CREATE_COUNT=$(echo "$PLAN_BODY" | jq -r '.create_count')
+        UPDATE_COUNT=$(echo "$PLAN_BODY" | jq -r '.update_count')
+        DELETE_COUNT=$(echo "$PLAN_BODY" | jq -r '.delete_count')
+        NO_CHANGE_COUNT=$(echo "$PLAN_BODY" | jq -r '.no_change_count')
+        
+        echo "manifest_name=$MANIFEST_NAME" >> $GITHUB_OUTPUT
+        
+        # Write plan to step summary
+        echo "## Infrastructure Plan: $MANIFEST_NAME" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Summary:** $CREATE_COUNT create, $UPDATE_COUNT update, $DELETE_COUNT delete, $NO_CHANGE_COUNT no-change" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Parse operations for detailed output
+        echo "$PLAN_BODY" | jq -r '.operations[] | select(.action != "no-change") | 
+          if .action == "create" then "+ " elif .action == "update" then "~ " elif .action == "delete" then "- " else "" end + 
+          .resource_type + ": " + .resource_name' >> $GITHUB_STEP_SUMMARY
+        
+        echo "::notice::Plan computed: $CREATE_COUNT create, $UPDATE_COUNT update, $DELETE_COUNT delete"
+    
+    - name: Apply infrastructure
+      id: apply
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+      run: |
+        echo "::notice::Applying infrastructure changes..."
+        
+        APPLY_RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -X POST \
+          -H "Authorization: Bearer ${API_TOKEN}" \
+          -H "X-Organization-ID: ${ORG_ID}" \
+          -H "Content-Type: application/x-yaml" \
+          --data-binary "@${MANIFEST_PATH}" \
+          "${API_URL}/api/v1/servers/infra/apply")
+        
+        HTTP_CODE=$(echo "$APPLY_RESPONSE" | tail -n1)
+        APPLY_BODY=$(echo "$APPLY_RESPONSE" | sed '$d')
+        
+        if [[ "$HTTP_CODE" != "200" ]]; then
+          echo "::error::Failed to apply changes (HTTP $HTTP_CODE)"
+          echo "::error::Response: $APPLY_BODY"
+          exit 1
+        fi
+        
+        # Extract results
+        MANIFEST_NAME=$(echo "$APPLY_BODY" | jq -r '.manifest_name')
+        SUCCESS=$(echo "$APPLY_BODY" | jq -r '.success')
+        SUCCESS_COUNT=$(echo "$APPLY_BODY" | jq -r '.success_count')
+        FAILURE_COUNT=$(echo "$APPLY_BODY" | jq -r '.failure_count')
+        
+        echo "manifest-name=$MANIFEST_NAME" >> $GITHUB_OUTPUT
+        echo "success=$SUCCESS" >> $GITHUB_OUTPUT
+        echo "operations-count=$SUCCESS_COUNT" >> $GITHUB_OUTPUT
+        
+        # Write results to step summary
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Apply Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Status:** $SUCCESS_COUNT succeeded, $FAILURE_COUNT failed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # List operations with results
+        echo "$APPLY_BODY" | jq -r '.operations[] | 
+          if .success then "✓ " else "✗ " end + 
+          .action + " " + .resource_type + ": " + .resource_name + 
+          (if .error then " - " + .error else "" end)' >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "$SUCCESS" != "true" ]]; then
+          echo "::error::Some operations failed (succeeded: $SUCCESS_COUNT, failed: $FAILURE_COUNT)"
+          exit 1
+        fi
+        
+        echo "::notice::✓ Infrastructure apply succeeded: $SUCCESS_COUNT operations"
