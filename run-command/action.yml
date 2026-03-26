@@ -54,6 +54,16 @@ inputs:
     required: false
     default: ''
 
+  wait:
+    description: 'Wait for the command to finish before completing the step'
+    required: false
+    default: 'false'
+
+  poll-interval:
+    description: 'Seconds between status checks (only used when wait=true)'
+    required: false
+    default: '10'
+
 outputs:
   job-id:
     description: 'Job ID for tracking command execution'
@@ -62,6 +72,10 @@ outputs:
   timestamp:
     description: 'Timestamp of command execution'
     value: ${{ steps.run-command.outputs.timestamp }}
+
+  status:
+    description: 'Final job status when wait=true: success or failure'
+    value: ${{ steps.wait-command.outputs.status }}
 
 runs:
   using: 'composite'
@@ -193,6 +207,32 @@ runs:
         echo "job-id=$job_id" >> $GITHUB_OUTPUT
         echo "timestamp=$timestamp" >> $GITHUB_OUTPUT
         
-        echo "::notice::✅ Command executed successfully"
+        echo "::notice::✅ Command dispatched"
         echo "::notice::📋 Job ID: $job_id"
         echo "::notice::⏰ Timestamp: $timestamp"
+
+    - name: Wait for command
+      id: wait-command
+      if: ${{ inputs.wait == 'true' }}
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        JOB_ID: ${{ steps.run-command.outputs.job-id }}
+        TIMEOUT: ${{ inputs.timeout }}
+        POLL_INTERVAL: ${{ inputs.poll-interval }}
+      run: |
+        set -euo pipefail
+
+        source "${{ github.action_path }}/../scripts/poll.sh"
+        poll_job "$API_URL" "$API_TOKEN" "$ORG_ID" "$JOB_ID" "$TIMEOUT" "$POLL_INTERVAL"
+
+        echo "status=$POLL_STATUS" >> "$GITHUB_OUTPUT"
+
+        if [[ "$POLL_STATUS" == "success" ]]; then
+          echo "::notice::✅ Command completed successfully (${POLL_DURATION}s)"
+        else
+          echo "::error::Command job $JOB_ID ended with status: $POLL_STATUS (${POLL_DURATION}s)"
+          exit 1
+        fi

@@ -1,0 +1,188 @@
+name: 'Underleaf Channel'
+description: 'Create a private mTLS relay channel between two Underleaf servers. Auto-closes when the job ends.'
+author: 'Ambient Labs'
+
+branding:
+  icon: 'link'
+  color: 'orange'
+
+inputs:
+  api-url:
+    description: 'Underleaf API URL'
+    required: false
+    default: 'https://api.underleafdev.com'
+
+  api-token:
+    description: 'Underleaf API token (uf_xxxxx_...)'
+    required: true
+
+  organization-id:
+    description: 'Organization ID'
+    required: true
+
+  source-server-id:
+    description: 'ID of the server that will initiate the connection'
+    required: true
+
+  dest-server-id:
+    description: |
+      ID of the destination server.
+      Use this OR deployment-slug + service-name for deployment-based routing.
+    required: false
+    default: ''
+
+  deployment-slug:
+    description: |
+      Route to a specific deployment by slug instead of a server ID.
+      Must be paired with service-name.
+    required: false
+    default: ''
+
+  service-name:
+    description: |
+      Service name within the deployment to route to.
+      Required when using deployment-slug.
+    required: false
+    default: ''
+
+  purpose:
+    description: 'Human-readable description of what the channel is used for'
+    required: false
+    default: 'github-actions'
+
+  ttl:
+    description: 'Channel lifetime in seconds (max 3600)'
+    required: false
+    default: '300'
+
+outputs:
+  channel-id:
+    description: 'Channel ID'
+    value: ${{ steps.create-channel.outputs.channel-id }}
+
+  grant:
+    description: 'Signed grant JWT — pass to agent commands that need to use this channel'
+    value: ${{ steps.create-channel.outputs.grant }}
+
+  status:
+    description: 'Channel status after creation'
+    value: ${{ steps.create-channel.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        if [[ -z "${{ inputs.source-server-id }}" ]]; then
+          echo "::error::source-server-id is required"
+          exit 1
+        fi
+
+        # Destination: either dest-server-id, or deployment-slug+service-name
+        has_dest_server="${{ inputs.dest-server-id }}"
+        has_deployment="${{ inputs.deployment-slug }}"
+        has_service="${{ inputs.service-name }}"
+
+        if [[ -z "$has_dest_server" && -z "$has_deployment" ]]; then
+          echo "::error::Provide either dest-server-id or deployment-slug + service-name"
+          exit 1
+        fi
+
+        if [[ -n "$has_deployment" && -z "$has_service" ]]; then
+          echo "::error::service-name is required when using deployment-slug"
+          exit 1
+        fi
+
+        ttl="${{ inputs.ttl }}"
+        if ! [[ "$ttl" =~ ^[0-9]+$ ]] || [[ "$ttl" -lt 1 ]] || [[ "$ttl" -gt 3600 ]]; then
+          echo "::error::ttl must be between 1 and 3600 seconds (got: $ttl)"
+          exit 1
+        fi
+
+    - name: Create channel
+      id: create-channel
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        SOURCE_SERVER_ID: ${{ inputs.source-server-id }}
+        DEST_SERVER_ID: ${{ inputs.dest-server-id }}
+        DEPLOYMENT_SLUG: ${{ inputs.deployment-slug }}
+        SERVICE_NAME: ${{ inputs.service-name }}
+        PURPOSE: ${{ inputs.purpose }}
+        TTL: ${{ inputs.ttl }}
+      run: |
+        set -euo pipefail
+
+        echo "::group::Loading helper scripts"
+        source "${{ github.action_path }}/../scripts/api.sh"
+        echo "::endgroup::"
+
+        echo "::group::Creating channel"
+
+        payload=$(jq -n \
+          --arg src "$SOURCE_SERVER_ID" \
+          --arg purpose "$PURPOSE" \
+          --argjson ttl "$TTL" \
+          '{source_server_id: $src, purpose: $purpose, ttl_seconds: $ttl}')
+
+        if [[ -n "$DEST_SERVER_ID" ]]; then
+          payload=$(echo "$payload" | jq --arg dst "$DEST_SERVER_ID" '. + {dest_server_id: $dst}')
+        else
+          payload=$(echo "$payload" | \
+            jq --arg slug "$DEPLOYMENT_SLUG" --arg svc "$SERVICE_NAME" \
+               '. + {deployment_slug: $slug, service_name: $svc}')
+        fi
+
+        payload=$(echo "$payload" | jq -c .)
+        echo "::debug::Payload: $payload"
+
+        response=$(make_api_request "$API_URL" "$API_TOKEN" "$ORG_ID" "POST" "/api/v1/servers/channels" "$payload")
+        echo "::debug::Response: $(echo "$response" | jq 'del(.grant)')"
+        echo "::endgroup::"
+
+        channel_id=$(echo "$response" | jq -r '.channel.id // empty')
+        grant=$(echo "$response" | jq -r '.grant // empty')
+        status=$(echo "$response" | jq -r '.channel.status // empty')
+
+        if [[ -z "$channel_id" ]]; then
+          echo "::error::Failed to get channel ID from response"
+          echo "::error::Response: $(echo "$response" | jq 'del(.grant)')"
+          exit 1
+        fi
+
+        echo "channel-id=$channel_id" >> "$GITHUB_OUTPUT"
+        echo "grant=$grant" >> "$GITHUB_OUTPUT"
+        echo "status=${status:-pending}" >> "$GITHUB_OUTPUT"
+
+        # Save channel-id for cleanup
+        echo "$channel_id" > /tmp/underleaf_channel_id
+
+        echo "::notice::🔗 Channel created"
+        echo "::notice::   Channel ID : $channel_id"
+        echo "::notice::   Status     : ${status:-pending}"
+        echo "::notice::   Purpose    : $PURPOSE"
+        echo "::notice::   TTL        : ${TTL}s"
+
+    - name: Close channel on job completion
+      if: always()
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+      run: |
+        CHANNEL_ID_FILE="/tmp/underleaf_channel_id"
+        if [[ ! -f "$CHANNEL_ID_FILE" ]]; then
+          exit 0
+        fi
+        CHANNEL_ID=$(cat "$CHANNEL_ID_FILE")
+        [[ -z "$CHANNEL_ID" ]] && exit 0
+
+        source "${{ github.action_path }}/../scripts/api.sh"
+        echo "::notice::Closing channel $CHANNEL_ID..."
+        make_api_delete "$API_URL" "$API_TOKEN" "$ORG_ID" "/api/v1/servers/channels/${CHANNEL_ID}" || true
+        rm -f "$CHANNEL_ID_FILE"
+        echo "::notice::Channel $CHANNEL_ID closed"

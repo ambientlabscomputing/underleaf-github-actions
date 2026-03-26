@@ -70,3 +70,25 @@ build_targeting_json() {
   echo "::debug::Targeting JSON built successfully: $result" >&2
   echo "$result"
 }
+
+# validate_targeting_optional: same as validate_targeting but allows NO targeting
+# to be specified (when targeting is embedded in a config file, e.g. deploy.yaml).
+# Still rejects mixed targeting (more than one method).
+validate_targeting_optional() {
+  local all_servers="$1"
+  local server_ids="$2"
+  local tags="$3"
+
+  local count=0
+  [[ "$all_servers" == "true" ]] && ((count++)) || true
+  [[ -n "$server_ids" ]] && ((count++)) || true
+  [[ -n "$tags" ]] && ((count++)) || true
+
+  if [[ $count -gt 1 ]]; then
+    echo "::error::Only one server targeting method can be used at a time" >&2
+    echo "::error::Found $count targeting methods specified" >&2
+    exit 1
+  fi
+
+  echo "::debug::Optional targeting validation passed (methods: $count)" >&2
+}

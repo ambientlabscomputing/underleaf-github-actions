@@ -44,6 +44,21 @@ inputs:
     required: false
     default: ''
 
+  wait:
+    description: 'Wait for the template to finish before completing the step'
+    required: false
+    default: 'false'
+
+  poll-interval:
+    description: 'Seconds between status checks (only used when wait=true)'
+    required: false
+    default: '10'
+
+  timeout:
+    description: 'Maximum seconds to wait when wait=true'
+    required: false
+    default: '600'
+
 outputs:
   job-id:
     description: 'Job ID for tracking template execution'
@@ -60,6 +75,10 @@ outputs:
   trigger-source:
     description: 'Source of the trigger (manual, cron)'
     value: ${{ steps.run-template.outputs.trigger-source }}
+
+  status:
+    description: 'Final job status when wait=true: success or failure'
+    value: ${{ steps.wait-template.outputs.status }}
 
 runs:
   using: 'composite'
@@ -172,7 +191,33 @@ runs:
         echo "timestamp=$timestamp" >> $GITHUB_OUTPUT
         echo "trigger-source=$trigger_source" >> $GITHUB_OUTPUT
         
-        echo "::notice::✅ Template executed successfully"
+        echo "::notice::✅ Template dispatched"
         echo "::notice::📋 Job ID: $job_id"
         echo "::notice::📝 Template ID: $template_id"
         echo "::notice::⏰ Timestamp: $timestamp"
+
+    - name: Wait for template
+      id: wait-template
+      if: ${{ inputs.wait == 'true' }}
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        JOB_ID: ${{ steps.run-template.outputs.job-id }}
+        TIMEOUT: ${{ inputs.timeout }}
+        POLL_INTERVAL: ${{ inputs.poll-interval }}
+      run: |
+        set -euo pipefail
+
+        source "${{ github.action_path }}/../scripts/poll.sh"
+        poll_job "$API_URL" "$API_TOKEN" "$ORG_ID" "$JOB_ID" "$TIMEOUT" "$POLL_INTERVAL"
+
+        echo "status=$POLL_STATUS" >> "$GITHUB_OUTPUT"
+
+        if [[ "$POLL_STATUS" == "success" ]]; then
+          echo "::notice::✅ Template completed successfully (${POLL_DURATION}s)"
+        else
+          echo "::error::Template job $JOB_ID ended with status: $POLL_STATUS (${POLL_DURATION}s)"
+          exit 1
+        fi

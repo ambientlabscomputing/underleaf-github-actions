@@ -1,0 +1,200 @@
+name: 'Underleaf Deploy'
+description: 'Deploy your application from GitHub to Underleaf servers using .underleaf/deploy.yaml'
+author: 'Ambient Labs'
+
+branding:
+  icon: 'upload-cloud'
+  color: 'green'
+
+inputs:
+  api-url:
+    description: 'Underleaf API URL'
+    required: false
+    default: 'https://api.underleafdev.com'
+
+  api-token:
+    description: 'Underleaf API token (uf_xxxxx_...)'
+    required: true
+
+  organization-id:
+    description: 'Organization ID'
+    required: true
+
+  source:
+    description: |
+      Source reference in "gh:owner/repo@ref" format.
+      Defaults to the current repository at the current commit SHA.
+    required: false
+    default: ''
+
+  github-token:
+    description: |
+      GitHub token for accessing private repositories.
+      Defaults to the built-in GITHUB_TOKEN (sufficient for the current repo).
+    required: false
+    default: ${{ github.token }}
+
+  all-servers:
+    description: 'Override targeting: run on all servers in the organization'
+    required: false
+    default: 'false'
+
+  server-ids:
+    description: 'Override targeting: comma-separated list of server IDs'
+    required: false
+    default: ''
+
+  tags:
+    description: 'Override targeting: JSON object of server tags (e.g., {"environment":"production"})'
+    required: false
+    default: ''
+
+  wait:
+    description: 'Wait for the deployment to complete before returning'
+    required: false
+    default: 'true'
+
+  timeout:
+    description: 'Maximum seconds to wait for deployment completion'
+    required: false
+    default: '600'
+
+  poll-interval:
+    description: 'Seconds between job status polls'
+    required: false
+    default: '10'
+
+outputs:
+  deployment-id:
+    description: 'Underleaf deployment ID (stable across redeploys)'
+    value: ${{ steps.deploy.outputs.deployment-id }}
+
+  job-id:
+    description: 'Apply job ID for this deployment run'
+    value: ${{ steps.deploy.outputs.job-id }}
+
+  slug:
+    description: 'Deployment slug (matches name in deploy.yaml)'
+    value: ${{ steps.deploy.outputs.slug }}
+
+  status:
+    description: 'Final deployment status: success or failure (only set when wait=true)'
+    value: ${{ steps.wait.outputs.status }}
+
+  public-url:
+    description: 'Public HTTPS URL of the first exposed service (if any)'
+    value: ${{ steps.deploy.outputs.public-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        source "${{ github.action_path }}/../scripts/common.sh"
+        validate_targeting_optional "${{ inputs.all-servers }}" "${{ inputs.server-ids }}" "${{ inputs.tags }}"
+
+        if [[ -z "${{ inputs.api-token }}" ]]; then
+          echo "::error::api-token is required"
+          exit 1
+        fi
+        if [[ -z "${{ inputs.organization-id }}" ]]; then
+          echo "::error::organization-id is required"
+          exit 1
+        fi
+
+    - name: Deploy from source
+      id: deploy
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        SOURCE_OVERRIDE: ${{ inputs.source }}
+        GITHUB_TOKEN_INPUT: ${{ inputs.github-token }}
+        ALL_SERVERS: ${{ inputs.all-servers }}
+        SERVER_IDS: ${{ inputs.server-ids }}
+        TAGS: ${{ inputs.tags }}
+      run: |
+        set -euo pipefail
+
+        echo "::group::Loading helper scripts"
+        source "${{ github.action_path }}/../scripts/common.sh"
+        source "${{ github.action_path }}/../scripts/api.sh"
+        echo "::endgroup::"
+
+        echo "::group::Building deploy request"
+
+        # Resolve source: use override if provided, otherwise auto-detect from GitHub context
+        if [[ -n "$SOURCE_OVERRIDE" ]]; then
+          SOURCE="$SOURCE_OVERRIDE"
+        else
+          SOURCE="gh:${GITHUB_REPOSITORY}@${GITHUB_SHA}"
+        fi
+        echo "::notice::Source: $SOURCE"
+
+        # Build payload
+        payload=$(jq -n \
+          --arg src "$SOURCE" \
+          --arg tok "$GITHUB_TOKEN_INPUT" \
+          '{source: $src, github_token: $tok}')
+
+        # Merge targeting override if provided
+        if [[ "$ALL_SERVERS" == "true" || -n "$SERVER_IDS" || -n "$TAGS" ]]; then
+          targeting=$(build_targeting_json "$ALL_SERVERS" "$SERVER_IDS" "$TAGS")
+          targeting_obj=$(echo "$targeting" | jq '{targeting: .}')
+          payload=$(echo "$payload" | jq ". + $targeting_obj")
+        fi
+
+        payload=$(echo "$payload" | jq -c .)
+        echo "::debug::Payload: $payload"
+        echo "::endgroup::"
+
+        echo "::group::Triggering deployment"
+        response=$(make_api_request "$API_URL" "$API_TOKEN" "$ORG_ID" "POST" "/api/v1/servers/deployments/source" "$payload")
+        echo "::debug::Response: $response"
+        echo "::endgroup::"
+
+        echo "::group::Parsing response"
+        deployment_id=$(echo "$response" | jq -r '.deployment_id // empty')
+        job_id=$(echo "$response" | jq -r '.job_id // empty')
+        slug=$(echo "$response" | jq -r '.slug // empty')
+        public_url=$(echo "$response" | jq -r '.exposures[0].public_url // empty' 2>/dev/null || true)
+
+        if [[ -z "$deployment_id" ]]; then
+          echo "::error::Failed to get deployment_id from response"
+          echo "::error::Response: $response"
+          exit 1
+        fi
+
+        echo "deployment-id=$deployment_id" >> "$GITHUB_OUTPUT"
+        echo "job-id=$job_id" >> "$GITHUB_OUTPUT"
+        echo "slug=$slug" >> "$GITHUB_OUTPUT"
+        echo "public-url=${public_url:-}" >> "$GITHUB_OUTPUT"
+        echo "::endgroup::"
+
+        echo "::notice::🚀 Deployment triggered"
+        echo "::notice::   Deployment ID : $deployment_id"
+        echo "::notice::   Job ID        : $job_id"
+        echo "::notice::   Slug          : $slug"
+        [[ -n "${public_url:-}" ]] && echo "::notice::   Public URL    : $public_url"
+
+    - name: Wait for deployment
+      id: wait
+      if: ${{ inputs.wait == 'true' }}
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        JOB_ID: ${{ steps.deploy.outputs.job-id }}
+        TIMEOUT: ${{ inputs.timeout }}
+        POLL_INTERVAL: ${{ inputs.poll-interval }}
+      run: |
+        set -euo pipefail
+        source "${{ github.action_path }}/../scripts/poll.sh"
+
+        poll_job "$API_URL" "$API_TOKEN" "$ORG_ID" "$JOB_ID" "$TIMEOUT" "$POLL_INTERVAL"
+
+        echo "status=$POLL_STATUS" >> "$GITHUB_OUTPUT"
+        echo "::notice::✅ Deployment completed in ${POLL_DURATION}s"

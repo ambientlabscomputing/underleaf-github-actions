@@ -1,0 +1,74 @@
+name: 'Underleaf Wait for Job'
+description: 'Poll an Underleaf job until it completes, fails, or times out.'
+author: 'Ambient Labs'
+
+branding:
+  icon: 'clock'
+  color: 'gray-dark'
+
+inputs:
+  api-url:
+    description: 'Underleaf API URL'
+    required: false
+    default: 'https://api.underleafdev.com'
+
+  api-token:
+    description: 'Underleaf API token (uf_xxxxx_...)'
+    required: true
+
+  organization-id:
+    description: 'Organization ID'
+    required: true
+
+  job-id:
+    description: 'Job ID to poll (from deployment, run-command, etc.)'
+    required: true
+
+  timeout:
+    description: 'Maximum time to wait in seconds before failing'
+    required: false
+    default: '600'
+
+  poll-interval:
+    description: 'Seconds between status checks'
+    required: false
+    default: '10'
+
+outputs:
+  status:
+    description: 'Final job status: success or failure'
+    value: ${{ steps.poll.outputs.status }}
+
+  duration:
+    description: 'Total seconds spent waiting'
+    value: ${{ steps.poll.outputs.duration }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Poll job
+      id: poll
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        JOB_ID: ${{ inputs.job-id }}
+        TIMEOUT: ${{ inputs.timeout }}
+        POLL_INTERVAL: ${{ inputs.poll-interval }}
+      run: |
+        set -euo pipefail
+
+        source "${{ github.action_path }}/../scripts/poll.sh"
+
+        poll_job "$API_URL" "$API_TOKEN" "$ORG_ID" "$JOB_ID" "$TIMEOUT" "$POLL_INTERVAL"
+
+        echo "status=$POLL_STATUS" >> "$GITHUB_OUTPUT"
+        echo "duration=$POLL_DURATION" >> "$GITHUB_OUTPUT"
+
+        if [[ "$POLL_STATUS" == "success" ]]; then
+          echo "::notice::Job $JOB_ID completed successfully in ${POLL_DURATION}s"
+        else
+          echo "::error::Job $JOB_ID ended with status: $POLL_STATUS (after ${POLL_DURATION}s)"
+          exit 1
+        fi

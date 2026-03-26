@@ -1,0 +1,227 @@
+name: 'Underleaf Tunnel'
+description: 'Expose a server port as a public HTTPS URL via Underleaf. Auto-closes when the job ends.'
+author: 'Ambient Labs'
+
+branding:
+  icon: 'globe'
+  color: 'purple'
+
+inputs:
+  api-url:
+    description: 'Underleaf API URL'
+    required: false
+    default: 'https://api.underleafdev.com'
+
+  api-token:
+    description: 'Underleaf API token (uf_xxxxx_...)'
+    required: true
+
+  organization-id:
+    description: 'Organization ID'
+    required: true
+
+  port:
+    description: 'Local port on the server to expose publicly (1-65535)'
+    required: true
+
+  server-id:
+    description: 'ID of the server to tunnel from (use this or targeting inputs)'
+    required: false
+    default: ''
+
+  hostname:
+    description: |
+      Custom subdomain for the tunnel URL (e.g. "my-preview" → my-preview.tunnel.underleaf.io).
+      If omitted, a random subdomain is assigned.
+      Tip: use "pr-${{ github.event.number }}" for stable PR preview URLs.
+    required: false
+    default: ''
+
+  all-servers:
+    description: 'Create tunnels on all servers in the organization'
+    required: false
+    default: 'false'
+
+  server-ids:
+    description: 'Comma-separated list of server IDs to tunnel from'
+    required: false
+    default: ''
+
+  tags:
+    description: 'JSON object of server tags to target (e.g., {"environment":"staging"})'
+    required: false
+    default: ''
+
+outputs:
+  tunnel-id:
+    description: 'Tunnel ID'
+    value: ${{ steps.create-tunnel.outputs.tunnel-id }}
+
+  public-url:
+    description: 'Public HTTPS URL for the tunnel'
+    value: ${{ steps.create-tunnel.outputs.public-url }}
+
+  hostname:
+    description: 'Assigned hostname'
+    value: ${{ steps.create-tunnel.outputs.hostname }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        source "${{ github.action_path }}/../scripts/common.sh"
+
+        # Must have server-id OR a targeting method
+        if [[ -z "${{ inputs.server-id }}" && \
+              "${{ inputs.all-servers }}" != "true" && \
+              -z "${{ inputs.server-ids }}" && \
+              -z "${{ inputs.tags }}" ]]; then
+          echo "::error::Provide server-id or at least one targeting method (all-servers, server-ids, or tags)"
+          exit 1
+        fi
+
+        # Validate port
+        port="${{ inputs.port }}"
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
+          echo "::error::port must be a number between 1 and 65535 (got: $port)"
+          exit 1
+        fi
+
+        # Reject mixed targeting
+        validate_targeting_optional \
+          "${{ inputs.all-servers }}" \
+          "${{ inputs.server-ids }}" \
+          "${{ inputs.tags }}"
+
+    - name: Create tunnel
+      id: create-tunnel
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+        PORT: ${{ inputs.port }}
+        SERVER_ID: ${{ inputs.server-id }}
+        HOSTNAME: ${{ inputs.hostname }}
+        ALL_SERVERS: ${{ inputs.all-servers }}
+        SERVER_IDS: ${{ inputs.server-ids }}
+        TAGS: ${{ inputs.tags }}
+      run: |
+        set -euo pipefail
+
+        echo "::group::Loading helper scripts"
+        source "${{ github.action_path }}/../scripts/common.sh"
+        source "${{ github.action_path }}/../scripts/api.sh"
+        echo "::endgroup::"
+
+        echo "::group::Creating tunnel"
+
+        payload=$(jq -n --arg port "$PORT" '{target: $port}')
+
+        if [[ -n "$HOSTNAME" ]]; then
+          payload=$(echo "$payload" | jq --arg h "$HOSTNAME" '. + {hostname: $h}')
+        fi
+
+        # Single server-id takes precedence over targeting
+        if [[ -n "$SERVER_ID" ]]; then
+          payload=$(echo "$payload" | jq --arg sid "$SERVER_ID" '. + {server_id: $sid}')
+        elif [[ "$ALL_SERVERS" == "true" || -n "$SERVER_IDS" || -n "$TAGS" ]]; then
+          targeting=$(build_targeting_json "$ALL_SERVERS" "$SERVER_IDS" "$TAGS")
+          targeting_obj=$(echo "$targeting" | jq '{targeting: .}')
+          payload=$(echo "$payload" | jq ". + $targeting_obj")
+        fi
+
+        payload=$(echo "$payload" | jq -c .)
+        echo "::debug::Payload: $payload"
+
+        response=$(make_api_request "$API_URL" "$API_TOKEN" "$ORG_ID" "POST" "/api/v1/servers/tunnels" "$payload")
+        echo "::debug::Response: $response"
+        echo "::endgroup::"
+
+        tunnel_id=$(echo "$response" | jq -r '.id // empty')
+        public_url=$(echo "$response" | jq -r '.public_url // empty')
+        hostname=$(echo "$response" | jq -r '.hostname // empty')
+
+        if [[ -z "$tunnel_id" ]]; then
+          echo "::error::Failed to get tunnel ID from response"
+          echo "::error::Response: $response"
+          exit 1
+        fi
+
+        echo "tunnel-id=$tunnel_id" >> "$GITHUB_OUTPUT"
+        echo "public-url=${public_url:-}" >> "$GITHUB_OUTPUT"
+        echo "hostname=${hostname:-}" >> "$GITHUB_OUTPUT"
+
+        # Save tunnel-id for cleanup post-step
+        echo "$tunnel_id" > /tmp/underleaf_tunnel_id
+
+        echo "::notice::🌐 Tunnel created"
+        echo "::notice::   Tunnel ID  : $tunnel_id"
+        echo "::notice::   Public URL : ${public_url:-pending}"
+        echo "::notice::   Hostname   : ${hostname:-auto-assigned}"
+
+    - name: Register tunnel cleanup
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+      run: |
+        # Write cleanup script so the post-job step can close the tunnel.
+        # This runs even if subsequent steps fail.
+        CLEANUP_SCRIPT="/tmp/underleaf_tunnel_cleanup.sh"
+        cat > "$CLEANUP_SCRIPT" << 'CLEANUP'
+        #!/bin/bash
+        TUNNEL_ID_FILE="/tmp/underleaf_tunnel_id"
+        if [[ ! -f "$TUNNEL_ID_FILE" ]]; then
+          echo "No tunnel ID file found, skipping cleanup"
+          exit 0
+        fi
+        TUNNEL_ID=$(cat "$TUNNEL_ID_FILE")
+        if [[ -z "$TUNNEL_ID" ]]; then
+          echo "Tunnel ID is empty, skipping cleanup"
+          exit 0
+        fi
+        echo "Closing tunnel $TUNNEL_ID..."
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          -X DELETE \
+          -H "Authorization: Bearer ${UNDERLEAF_API_TOKEN}" \
+          -H "X-Organization-ID: ${UNDERLEAF_ORG_ID}" \
+          "${UNDERLEAF_API_URL}/api/v1/servers/tunnels/${TUNNEL_ID}")
+        if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "204" ]]; then
+          echo "Tunnel $TUNNEL_ID closed successfully"
+        else
+          echo "Warning: tunnel close returned HTTP $HTTP_CODE"
+        fi
+        rm -f "$TUNNEL_ID_FILE"
+        CLEANUP
+        chmod +x "$CLEANUP_SCRIPT"
+        echo "UNDERLEAF_API_TOKEN=$API_TOKEN" >> /tmp/underleaf_tunnel_env
+        echo "UNDERLEAF_ORG_ID=$ORG_ID" >> /tmp/underleaf_tunnel_env
+        echo "UNDERLEAF_API_URL=$API_URL" >> /tmp/underleaf_tunnel_env
+
+    - name: Close tunnel on job completion
+      if: always()
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        API_TOKEN: ${{ inputs.api-token }}
+        ORG_ID: ${{ inputs.organization-id }}
+      run: |
+        # This step always runs (success or failure) to clean up the tunnel.
+        # Using a dedicated always() step is the composite action equivalent
+        # of a post-step cleanup hook.
+        TUNNEL_ID_FILE="/tmp/underleaf_tunnel_id"
+        if [[ ! -f "$TUNNEL_ID_FILE" ]]; then
+          exit 0
+        fi
+        TUNNEL_ID=$(cat "$TUNNEL_ID_FILE")
+        [[ -z "$TUNNEL_ID" ]] && exit 0
+
+        source "${{ github.action_path }}/../scripts/api.sh"
+        echo "::notice::Closing tunnel $TUNNEL_ID..."
+        make_api_delete "$API_URL" "$API_TOKEN" "$ORG_ID" "/api/v1/servers/tunnels/${TUNNEL_ID}" || true
+        rm -f "$TUNNEL_ID_FILE"
+        echo "::notice::Tunnel $TUNNEL_ID closed"

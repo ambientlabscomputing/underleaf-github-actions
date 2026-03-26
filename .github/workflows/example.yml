@@ -1,180 +1,202 @@
 name: Example Workflows
 
+# These jobs show idiomatic usage for each Underleaf GitHub Action.
+# Copy the jobs you need into your own workflow file.
+#
+# Required secrets:
+#   UNDERLEAF_API_TOKEN  — your Underleaf API token (uf_xxxxx_...)
+#   UNDERLEAF_ORG_ID     — your organization ID
+#
+# Required variables (set in Settings → Variables):
+#   STAGING_SERVER_ID    — server ID for staging environment
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
+# ─────────────────────────────────────────────────────────────
+# JOB 1: Push-to-deploy (the main use case)
+# Runs on every push to main.  Idempotent — re-running this job
+# updates the existing deployment rather than creating a new one.
+# ─────────────────────────────────────────────────────────────
 jobs:
-  # ============================================
-  # RUN COMMAND EXAMPLES
-  # ============================================
-  
-  # Example 1: Deploy to production
-  deploy-production:
+  deploy:
+    name: Deploy to production
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Deploy application
+      - uses: actions/checkout@v4
+
+      - name: Deploy
         id: deploy
-        uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
+        uses: ambientlabscomputing/underleaf-github-actions/deploy@v2
         with:
           api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
           organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
-          command: './scripts/deploy.sh'
-          work-dir: '/opt/myapp'
-          timeout: 600
-          tags: '{"environment":"production","app":"web"}'
-          env-vars: '{"VERSION":"${{ github.sha }}","BRANCH":"${{ github.ref_name }}"}'
-      
+          # wait=true (default) blocks until the deployment succeeds or fails
+
       - name: Print deployment info
         run: |
-          echo "Deployment initiated"
-          echo "Job ID: ${{ steps.deploy.outputs.job-id }}"
-          echo "Timestamp: ${{ steps.deploy.outputs.timestamp }}"
+          echo "Deployment ID : ${{ steps.deploy.outputs.deployment-id }}"
+          echo "Slug          : ${{ steps.deploy.outputs.slug }}"
+          echo "Status        : ${{ steps.deploy.outputs.status }}"
+          echo "Public URL    : ${{ steps.deploy.outputs.public-url }}"
 
-  # Example 2: Run tests on staging
-  test-staging:
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2: PR preview environment with tunnel
+  # Opens a public HTTPS URL for end-to-end tests.
+  # The tunnel is automatically deleted when the job ends.
+  # ─────────────────────────────────────────────────────────────
+  preview:
+    name: PR preview
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Run integration tests
+      - uses: actions/checkout@v4
+
+      - name: Deploy preview build
+        id: deploy
+        uses: ambientlabscomputing/underleaf-github-actions/deploy@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          tags: '{"environment":"preview"}'
+
+      - name: Open public tunnel
+        id: tunnel
+        uses: ambientlabscomputing/underleaf-github-actions/tunnel@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          port: 8080
+          server-id: ${{ vars.STAGING_SERVER_ID }}
+
+      - name: Comment preview URL on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 Preview ready: ${{ steps.tunnel.outputs.public-url }}\nDeployment: \`${{ steps.deploy.outputs.slug }}\``
+            })
+
+      - name: Run smoke tests against preview URL
+        run: |
+          curl --fail --retry 5 --retry-delay 3 \
+            "${{ steps.tunnel.outputs.public-url }}/health"
+
+      # Tunnel auto-closes when the job ends (success or failure)
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 3: Secret sync via private channel
+  # Securely copies secrets from a secrets server to an app server
+  # over a mTLS channel — no traffic leaves the private mesh.
+  # ─────────────────────────────────────────────────────────────
+  sync-secrets:
+    name: Sync secrets
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Open channel
+        id: channel
+        uses: ambientlabscomputing/underleaf-github-actions/channel@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          source-server-id: ${{ vars.SECRETS_SERVER_ID }}
+          dest-server-id: ${{ vars.APP_SERVER_ID }}
+          purpose: 'secret-sync'
+          ttl: '120'
+
+      - name: Push secrets over channel
         uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
         with:
           api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
           organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
-          command: 'npm run test:integration'
-          work-dir: '/var/www/staging'
-          tags: '{"environment":"staging","app":"api"}'
+          command: 'ufctl secrets push --channel "$CHANNEL_GRANT"'
+          server-ids: ${{ vars.SECRETS_SERVER_ID }}
+          env-vars: '{"CHANNEL_GRANT":"${{ steps.channel.outputs.grant }}"}'
+          wait: 'true'
 
-  # Example 3: Database migration
-  migrate-database:
+      # Channel auto-closes when the job ends
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 4: Database migration with wait
+  # Waits for the migration command to complete before continuing.
+  # ─────────────────────────────────────────────────────────────
+  migrate:
+    name: Database migration
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Run database migrations
+      - name: Run migrations
         uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
         with:
           api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
           organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
           command: 'npm run migrate'
-          server-ids: 'db-primary-abc123'
-          timeout: 900
+          server-ids: ${{ vars.DB_PRIMARY_SERVER_ID }}
+          wait: 'true'
+          timeout: '900'
 
-  # Example 4: Clear cache across all servers
-  clear-cache:
+  # ─────────────────────────────────────────────────────────────
+  # JOB 5: Template-based deployment
+  # Triggers a saved template by ID and waits for it to finish.
+  # ─────────────────────────────────────────────────────────────
+  deploy-template:
+    name: Deploy via template
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
-      - name: Clear application cache
+      - name: Run deploy template
+        uses: ambientlabscomputing/underleaf-github-actions/run-template@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          template-id: 'tpl_deploy_webapp'
+          inputs: '{"version":"${{ github.ref_name }}","env":"production"}'
+          tags: '{"app":"api"}'
+          wait: 'true'
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 6: Full pipeline — deploy → wait → smoke test
+  # Shows how to compose multiple actions in a single job.
+  # ─────────────────────────────────────────────────────────────
+  full-pipeline:
+    name: Full pipeline
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy (fire and forget)
+        id: deploy
+        uses: ambientlabscomputing/underleaf-github-actions/deploy@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          wait: 'false'
+
+      # ... do other preparatory work here while deploy is in flight ...
+
+      - name: Wait for deployment
+        uses: ambientlabscomputing/underleaf-github-actions/wait-for-job@v2
+        with:
+          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
+          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
+          job-id: ${{ steps.deploy.outputs.job-id }}
+          timeout: '600'
+
+      - name: Run post-deploy cache flush
         uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
         with:
           api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
           organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
           command: 'systemctl restart myapp-cache'
           all-servers: 'true'
+          wait: 'true'
 
-  # Example 5: Multi-region deployment
-  deploy-multi-region:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    strategy:
-      matrix:
-        region: [us-east-1, us-west-2, eu-west-1]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Deploy to ${{ matrix.region }}
-        uses: ambientlabscomputing/underleaf-github-actions/run-command@v2
-        with:
-          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
-          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
-          command: './deploy-region.sh'
-          tags: '{"region":"${{ matrix.region }}","environment":"production"}'
-          env-vars: '{"REGION":"${{ matrix.region }}"}'
-
-  # ============================================
-  # RUN TEMPLATE EXAMPLES
-  # ============================================
-
-  # Example 6: Deploy using template
-  deploy-template:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-      
-      - name: Deploy with version template
-        id: template-deploy
-        uses: ambientlabscomputing/underleaf-github-actions/run-template@v2
-        with:
-          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
-          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
-          template-id: 'tpl_deploy_app'
-          inputs: '{"version":"${{ github.ref_name }}","environment":"production","rollback":"false"}'
-          tags: '{"app":"web","environment":"production"}'
-      
-      - name: Print template execution info
-        run: |
-          echo "Template deployment initiated"
-          echo "Job ID: ${{ steps.template-deploy.outputs.job-id }}"
-          echo "Template ID: ${{ steps.template-deploy.outputs.template-id }}"
-          echo "Trigger Source: ${{ steps.template-deploy.outputs.trigger-source }}"
-
-  # Example 7: Database backup template
-  backup-database:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - name: Backup production database
-        uses: ambientlabscomputing/underleaf-github-actions/run-template@v2
-        with:
-          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
-          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
-          template-id: 'tpl_db_backup'
-          inputs: |
-            {
-              "database": "production_db",
-              "backup_path": "/backups/${{ github.run_id }}",
-              "compress": "true",
-              "retention_days": "30"
-            }
-          server-ids: 'db-primary-001'
-
-  # Example 8: Maintenance template across all servers
-  maintenance-template:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Run maintenance tasks
-        uses: ambientlabscomputing/underleaf-github-actions/run-template@v2
-        with:
-          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
-          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
-          template-id: 'tpl_maintenance'
-          inputs: '{"task":"cleanup","dry_run":"false"}'
-          all-servers: 'true'
-
-  # Example 9: Rollback template
-  rollback-deployment:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - name: Rollback to previous version
-        uses: ambientlabscomputing/underleaf-github-actions/run-template@v2
-        with:
-          api-token: ${{ secrets.UNDERLEAF_API_TOKEN }}
-          organization-id: ${{ secrets.UNDERLEAF_ORG_ID }}
-          template-id: 'tpl_rollback'
-          inputs: '{"target_version":"previous","environment":"production"}'
-          tags: '{"app":"web","environment":"production"}'
